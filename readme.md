@@ -8,7 +8,7 @@ Since, for now, this is a one-man project I can't guarantee that I'll be able to
 
 The _plan_ is that you'll just run: 
 ``` bash
-pip3 install wingman-ardupilot
+pip install wingman-ardupilot
 ```
 and it'll just install on your device. Imma check out how to register with a package tracker but for now you'll have to follow this install process:
 ``` bash
@@ -16,6 +16,20 @@ cd wingman-ardupilot
 pip install .
 pip install -r requirements.txt
 ```
+
+## Known Issues
+### Upload Mission
+```python
+Vehicle.upload_mission()
+```
+For this function, first waypoint doesn't upload. Not sure why
+
+### Setting home
+```python
+Vehicle.set_home()
+```
+Doesn't work for now
+
 ## Control Interface Model
 Wingman talks to the UAV using one of three "techniques" known as "control interfaces":
 - Brain->Brain
@@ -40,3 +54,4 @@ Brain->Bone is also the layer which is mostly automated by wingman. If there is 
 
 ## Interfacing with Lua Scripts
 In my experience, the "bone level" commands are handled much better using lua scripting, so I will look into a way to interface this with lua scripts running on the autopilot.
+
