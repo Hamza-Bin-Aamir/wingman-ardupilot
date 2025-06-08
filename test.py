@@ -34,7 +34,7 @@ def test_vehicle_send_and_receive():
     v.close()  
 def test_vehicle_upload_and_download_mission():
     from wingman.vehicle import Vehicle
-    from mission import Mission, Waypoint
+    from wingman.mission import Mission, Waypoint
 
     v = Vehicle(get_conn_string())
     # Wait for heartbeat

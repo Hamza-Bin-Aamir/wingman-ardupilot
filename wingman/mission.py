@@ -49,27 +49,18 @@ class Mission:
     def clear(self):
         self.waypoints = []
 
-    def count(self, include_home=True):
-        if include_home:
-            return len(self.waypoints)
-        else:
-            return len([wp for wp in self.waypoints if not wp.is_home()])
+    def count(self):
+        return len(self.waypoints)
 
-    def get_waypoint(self, idx, include_home=True):
-        if include_home:
+    def get_waypoint(self, idx):
             return self.waypoints[idx]
-        else:
-            # Return only non-home waypoints
-            non_home = [wp for wp in self.waypoints if not wp.is_home()]
-            return non_home[idx]
-
     def to_mavlink(self):
         """Return a list of MAVLink mission_item messages (system/component must be set before sending)."""
         return [wp.to_mavlink() for wp in self.waypoints]
 
-    def show(self, include_home=True):
+    def show(self):
         """Print all waypoints in the mission."""
-        wps = self.waypoints if include_home else [wp for wp in self.waypoints if not wp.is_home()]
+        wps = self.waypoints
         if not wps:
             print("No waypoints in mission.")
         for wp in wps:

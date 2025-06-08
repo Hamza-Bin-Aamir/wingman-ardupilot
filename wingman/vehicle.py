@@ -2,7 +2,7 @@ from pymavlink import mavutil
 import threading
 import queue
 import time
-from mission import Mission, Waypoint
+from wingman.mission import Mission, Waypoint
 
 class Vehicle:
     def __init__(self, connection_string, baud=115200, source_system=255):
@@ -174,7 +174,6 @@ class Vehicle:
         """
         waypoints = mission.waypoints 
         self.master.mav.mission_count_send(target_system, target_component, len(waypoints))
-        Should_Increment = False
         for i, wp in enumerate(waypoints):
             # Register for the expected response before sending
             req_queue = self.register_message_listener(['MISSION_REQUEST_INT', 'MISSION_REQUEST'])
