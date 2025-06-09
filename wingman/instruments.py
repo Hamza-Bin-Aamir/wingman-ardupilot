@@ -1,6 +1,5 @@
 from pymavlink import mavutil
 import threading
-import queue
 import time
 import copy
 
@@ -17,39 +16,47 @@ class AttitudeMonitor:
     """
     Continuously monitors vehicle attitude using MAVLink ATTITUDE messages.
     Usage:
-        monitor = AttitudeMonitor(mav)
+        monitor = AttitudeMonitor(vehicle)
         monitor.start()
         att = monitor.get_attitude()
         monitor.stop()
     """
     def __init__(self, vehicle):
-        self.mav = vehicle.master
+        self.vehicle = vehicle
         self._attitude = None
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._lock = threading.Lock()
+        self._attitude_queue = None
 
     def _run(self):
         while not self._stop_event.is_set():
-            msg = self.mav.recv_match(type='ATTITUDE', blocking=True, timeout=1)
-            if msg:
-                with self._lock:
-                    self._attitude = self.Attitude(msg.roll, msg.pitch, msg.yaw)
+            try:
+                msg = self._attitude_queue.get(timeout=1)
+                if msg:
+                    with self._lock:
+                        self._attitude = self.Attitude(msg.roll, msg.pitch, msg.yaw)
+            except Exception:
+                continue
             time.sleep(0.01)
 
     def start(self):
         if not self._thread.is_alive():
             self._stop_event.clear()
+            self._attitude_queue = self.vehicle.register_message_listener('ATTITUDE')
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
 
     def stop(self):
         self._stop_event.set()
         self._thread.join()
+        if self._attitude_queue:
+            self.vehicle.unregister_message_listener('ATTITUDE', self._attitude_queue)
+            self._attitude_queue = None
 
     def get_attitude(self):
         """
-        Returns the Attitude(roll, pitch, yaw) in radians, or None if not yet received.
+        Returns a copy of Attitude(roll, pitch, yaw) in radians, or None if not yet received.
         """
         with self._lock:
             return self._attitude

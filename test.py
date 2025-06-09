@@ -133,17 +133,18 @@ def test_location_monitor(show=False):
 
     monitor = PositionMonitor(v)
     monitor.start()
+    updates = 0
     start = time.time()
     pos = None
-    while time.time() - start < 5:
+    while updates < 5 and time.time() - start < 10:
         pos = monitor.locate()
         if pos:
+            updates += 1
             if show:
-                print(f"[LocationMonitor] lat={pos.lat:.7f}, lon={pos.lon:.7f}, alt={pos.alt:.2f}")
-            break
+                print(f"[LocationMonitor] update {updates}: lat={pos.lat:.7f}, lon={pos.lon:.7f}, alt={pos.alt:.2f}")
         time.sleep(0.1)
     monitor.stop()
-    assert pos is not None, "No position received from vehicle"
+    assert pos is not None and updates == 5, "Did not receive 5 position updates from vehicle"
 
 def test_attitude_monitor(show=False):
     setup_vehicle()
@@ -152,17 +153,18 @@ def test_attitude_monitor(show=False):
 
     monitor = AttitudeMonitor(v)
     monitor.start()
+    updates = 0
     start = time.time()
     att = None
-    while time.time() - start < 5:
+    while updates < 5 and time.time() - start < 10:
         att = monitor.get_attitude()
         if att:
+            updates += 1
             if show:
-                print(f"[AttitudeMonitor] roll={att.roll:.3f}, pitch={att.pitch:.3f}, yaw={att.yaw:.3f}")
-            break
+                print(f"[AttitudeMonitor] update {updates}: roll={att.roll:.3f}, pitch={att.pitch:.3f}, yaw={att.yaw:.3f}")
         time.sleep(0.1)
     monitor.stop()
-    assert att is not None, "No attitude received from vehicle"
+    assert att is not None and updates == 5, "Did not receive 5 attitude updates from vehicle"
 
 # Add to main test runner
 if __name__ == "__main__":
