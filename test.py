@@ -166,6 +166,26 @@ def test_attitude_monitor(show=False):
     monitor.stop()
     assert att is not None and updates == 5, "Did not receive 5 attitude updates from vehicle"
 
+def test_custom_monitor(show=False):
+    setup_vehicle()
+    v = global_vehicle
+    from wingman.instruments import CustomMonitor
+
+    monitor = CustomMonitor(v, 'SYS_STATUS')
+    monitor.start()
+    updates = 0
+    start = time.time()
+    data = None
+    while updates < 5 and time.time() - start < 10:
+        data = monitor.get_data()
+        if data:
+            updates += 1
+            if show:
+                print(f"[CustomMonitor] update {updates}: {data}")
+        time.sleep(0.1)
+    monitor.stop()
+    assert data is not None and updates == 5, "Did not receive 5 SYS_STATUS updates from vehicle"
+
 # Add to main test runner
 if __name__ == "__main__":
     def run_test(name, func):
@@ -183,6 +203,7 @@ if __name__ == "__main__":
         run_test("test_vehicle_set_and_get_home", test_vehicle_set_and_get_home)
         run_test("test_location_monitor", test_location_monitor)
         run_test("test_attitude_monitor", test_attitude_monitor)
+        run_test("test_custom_monitor", test_custom_monitor)
         print("All tests passed!")
     finally:
         free_vehicle()
