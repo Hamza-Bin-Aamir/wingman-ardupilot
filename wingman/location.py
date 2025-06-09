@@ -1,8 +1,6 @@
 from pymavlink import mavutil
 import threading
 import time
-import copy
-
 class PositionMonitor:
     class Position:
         def __init__(self, lat, lon, alt):
