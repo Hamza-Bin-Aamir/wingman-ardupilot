@@ -2,6 +2,8 @@
 
 Wingman is an open-source continuation of a project I started working on during my time at Team Swift. Essentially, the aim is to remove the headache of using pymavlink. What this does is wrap all the complicated back-end around an easy-to-use interface. You can always _optionally_ access the backend, but if you don't care, it'll handle it for you.
 
+Another way this simplifies pymavlink is regularity. The hope is to abstract the protocol away and instead rely on regular patterns that make it easy to remember how to write code and focus on the high level programming rather than the nitty gritty of the mavlink protocol. 
+
 Since, for now, this is a one-man project I can't guarantee that I'll be able to maintain it well, and it'll likely start by only serving the functionality I will actually use, but my hope is that with time this can grow into something useful for more people, which is why I'm open sourcing it.
 
 ## How to install
