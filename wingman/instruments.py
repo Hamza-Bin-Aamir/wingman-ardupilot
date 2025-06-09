@@ -1,7 +1,7 @@
 from pymavlink import mavutil
 import threading
 import time
-import copy
+import queue
 
 class AttitudeMonitor:
     class Attitude:
@@ -36,7 +36,7 @@ class AttitudeMonitor:
                 if msg:
                     with self._lock:
                         self._attitude = self.Attitude(msg.roll, msg.pitch, msg.yaw)
-            except Exception:
+            except queue.Empty:
                 continue
             time.sleep(0.01)
 
@@ -56,7 +56,7 @@ class AttitudeMonitor:
 
     def get_attitude(self):
         """
-        Returns a copy of Attitude(roll, pitch, yaw) in radians, or None if not yet received.
+        Returns Attitude(roll, pitch, yaw) in radians, or None if not yet received.
         """
         with self._lock:
             return self._attitude
@@ -88,7 +88,7 @@ class CustomMonitor:
                     with self._lock:
                         # Convert MAVLink message to dict (excluding private fields)
                         self._data = {k: v for k, v in msg.__dict__.items() if not k.startswith('_')}
-            except Exception:
+            except queue.Empty:
                 continue
             time.sleep(0.01)
 

@@ -1,6 +1,8 @@
 from pymavlink import mavutil
 import threading
 import time
+import queue
+
 class PositionMonitor:
     class Position:
         def __init__(self, lat, lon, alt):
@@ -34,7 +36,7 @@ class PositionMonitor:
                 if msg:
                     with self._lock:
                         self._position = self.Position(msg.lat / 1e7, msg.lon / 1e7, msg.alt / 1000.0)
-            except Exception:
+            except queue.Empty:
                 continue
             time.sleep(0.01)
 
@@ -54,7 +56,7 @@ class PositionMonitor:
 
     def locate(self):
         """
-        Returns a copy of Position(lat, lon, alt) or None if not yet received.
+        Returns Position(lat, lon, alt) or None if not yet received.
         """
         with self._lock:
             return self._position
