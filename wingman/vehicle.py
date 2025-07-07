@@ -39,6 +39,19 @@ class Vehicle:
         self.last_nav_controller_output = None      # Latest NAV_CONTROLLER_OUTPUT message
         self.home_position = None                   # HOME_POSITION message
         self.last_heartbeat_msg = None              # Latest HEARTBEAT message for flight mode
+        
+        # Mission data monitoring
+        self.last_mission_current = None            # Latest MISSION_CURRENT message (current mission item)
+        self.last_mission_item_reached = None       # Latest MISSION_ITEM_REACHED message
+        self.mission_items_cache = {}               # Cache for MISSION_ITEM responses {seq: mission_item_msg}
+        self.pending_mission_item_requests = set()  # Track pending MISSION_ITEM requests
+
+        # STATUSTEXT message queue for autopilot messages
+        self.statustext_messages = queue.Queue(maxsize=50)  # Limited queue for autopilot text messages
+        
+        # Debug counters
+        self._total_messages_received = 0
+        self._statustext_messages_received = 0
 
         # Start threads for sending, receiving, and heartbeats
         self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
@@ -79,10 +92,17 @@ class Vehicle:
                         del self._msg_registrations[t]
 
     def _recv_loop(self):
+        print("🔄 _recv_loop started")
         while not self._stop_event.is_set():
             msg = self.master.recv_match(blocking=True, timeout=1)
             if msg:
+                self._total_messages_received += 1
                 msg_type = msg.get_type()
+                
+                # Debug: print every 100th message to avoid spam, but always print STATUSTEXT
+                if msg_type == "STATUSTEXT" or self._total_messages_received % 100 == 0:
+                    print(f"🔄 _recv_loop received: {msg_type} (total: {self._total_messages_received})")
+                
                 # Put in registered queues first
                 with self._msg_reg_lock:
                     for t, qs in self._msg_registrations.items():
@@ -95,6 +115,14 @@ class Vehicle:
                         self.last_heartbeat_time = time.time()
                     with self._flight_data_lock:
                         self.last_heartbeat_msg = msg
+                        # Update vehicle_type on every new heartbeat
+                        mav_type = getattr(msg, 'type', None)
+                        if mav_type == 1:
+                            self.vehicle_type = 'plane'
+                        elif mav_type in [2, 3, 14, 17]:
+                            self.vehicle_type = 'copter'
+                        else:
+                            self.vehicle_type = 'unknown'
                 # Special handling for EKF and vibration data
                 elif msg_type == "VIBRATION":
                     with self._ekf_vibe_lock:
@@ -131,6 +159,44 @@ class Vehicle:
                 elif msg_type == "HOME_POSITION":
                     with self._flight_data_lock:
                         self.home_position = msg
+                elif msg_type == "MISSION_CURRENT":
+                    with self._flight_data_lock:
+                        self.last_mission_current = msg
+                elif msg_type == "MISSION_ITEM_REACHED":
+                    with self._flight_data_lock:
+                        self.last_mission_item_reached = msg
+                elif msg_type == "MISSION_ITEM":
+                    with self._flight_data_lock:
+                        # Cache the mission item and mark request as complete
+                        self.mission_items_cache[msg.seq] = msg
+                        self.pending_mission_item_requests.discard(msg.seq)
+                # Handle STATUSTEXT messages for autopilot text messages
+                elif msg_type == "STATUSTEXT":
+                    self._statustext_messages_received += 1
+                    # Debug logging for STATUSTEXT messages
+                    text = getattr(msg, 'text', '')
+                    # Handle both string and bytes cases
+                    if isinstance(text, bytes):
+                        text = text.decode('utf-8', errors='ignore').strip()
+                    elif isinstance(text, str):
+                        text = text.strip()
+                    else:
+                        text = str(text).strip()
+                    
+                    severity = getattr(msg, 'severity', 6)
+                    print(f"🔤 STATUSTEXT #{self._statustext_messages_received} received: severity={severity}, text='{text}'")
+                    
+                    try:
+                        self.statustext_messages.put_nowait(msg)
+                        print(f"📥 STATUSTEXT queued. Queue size: {self.statustext_messages.qsize()}")
+                    except queue.Full:
+                        # Remove oldest message if queue is full
+                        try:
+                            self.statustext_messages.get_nowait()
+                            self.statustext_messages.put_nowait(msg)
+                            print(f"📥 STATUSTEXT queue was full, replaced oldest. Queue size: {self.statustext_messages.qsize()}")
+                        except queue.Empty:
+                            pass
                 self.recv_queue.put(msg)
 
     def _send_loop(self):
@@ -267,6 +333,8 @@ class Vehicle:
             if not got_req or got_req.seq != i:
                 raise TimeoutError(f"Timeout waiting for MISSION_REQUEST(_INT) for seq {i}")
             # Always send MISSION_ITEM_INT
+            print(f"🌐 Sending MAVLink MISSION_ITEM_INT: seq={wp.seq}, frame={wp.frame}, cmd={wp.command}, current={wp.current}, auto={int(wp.autocontinue)}")
+            print(f"🌐   params=[{wp.param1}, {wp.param2}, {wp.param3}, {wp.param4}], coords=[{int(wp.x * 1e7)}, {int(wp.y * 1e7)}], alt={wp.z}")
             self.master.mav.mission_item_int_send(
                 target_system,
                 target_component,
@@ -296,6 +364,74 @@ class Vehicle:
         self.unregister_message_listener('MISSION_ACK', ack_queue)
         if not ack:
             raise TimeoutError("Timeout waiting for MISSION_ACK")
+        
+        print(f"✅ Mission upload completed! Uploaded {len(waypoints)} waypoints, received MISSION_ACK type={ack.type}")
+        
+        # Store mission count for status tracking (from upload)
+        with self._flight_data_lock:
+            pass  # Mission count no longer tracked
+
+    def set_current_waypoint(self, waypoint_seq, target_system=1, target_component=1, timeout=5):
+        """
+        Set the current waypoint in the mission to the specified sequence number.
+        This tells ArduPilot which waypoint to execute next when in AUTO mode.
+        """
+        print(f"🎯 Setting current waypoint to seq={waypoint_seq}")
+        
+        # Send MISSION_SET_CURRENT command
+        print(f"🌐 Sending MISSION_SET_CURRENT: target_system={target_system}, target_component={target_component}, seq={waypoint_seq}")
+        self.master.mav.mission_set_current_send(
+            target_system,
+            target_component,
+            waypoint_seq
+        )
+        print(f"🌐 MISSION_SET_CURRENT sent successfully")
+        
+        # Wait for MISSION_CURRENT response to confirm
+        print(f"🔄 Waiting for MISSION_CURRENT confirmation...")
+        current_queue = self.register_message_listener('MISSION_CURRENT')
+        start = time.time()
+        received_messages = 0
+        while time.time() - start < timeout:
+            try:
+                current_msg = current_queue.get(timeout=0.5)
+                received_messages += 1
+                print(f"📥 Received MISSION_CURRENT: seq={current_msg.seq} (expected={waypoint_seq}) - message #{received_messages}")
+                if current_msg.seq == waypoint_seq:
+                    print(f"✅ Current waypoint set to seq={waypoint_seq}")
+                    self.unregister_message_listener('MISSION_CURRENT', current_queue)
+                    return True
+            except queue.Empty:
+                print(f"⏳ No MISSION_CURRENT received yet... ({time.time() - start:.1f}s elapsed)")
+                continue
+        
+        self.unregister_message_listener('MISSION_CURRENT', current_queue)
+        print(f"⚠️  Timeout waiting for MISSION_CURRENT confirmation for seq={waypoint_seq} (received {received_messages} messages)")
+        return False
+
+    def set_current_waypoint_alternative(self, waypoint_seq, target_system=1, target_component=1):
+        """
+        Alternative method to set current waypoint using DO_SET_MISSION_CURRENT command.
+        This is sometimes more reliable than MISSION_SET_CURRENT.
+        """
+        print(f"🎯 Alternative: Setting current waypoint to seq={waypoint_seq} using DO_SET_MISSION_CURRENT")
+        
+        # Send MAV_CMD_DO_SET_MISSION_CURRENT command
+        self.master.mav.command_long_send(
+            target_system,
+            target_component,
+            mavutil.mavlink.MAV_CMD_DO_SET_MISSION_CURRENT,  # command
+            0,  # confirmation
+            waypoint_seq,  # param1: sequence number
+            0,  # param2: unused
+            0,  # param3: unused
+            0,  # param4: unused
+            0,  # param5: unused
+            0,  # param6: unused
+            0   # param7: unused
+        )
+        print(f"🌐 DO_SET_MISSION_CURRENT command sent for seq={waypoint_seq}")
+        return True
 
     def download_mission(self, target_system=1, target_component=1, timeout=10):
         """
@@ -349,6 +485,11 @@ class Vehicle:
                 param4=item.param4
             )
             mission.add_waypoint(wp)
+        
+        # Store mission count for status tracking (from download)
+        with self._flight_data_lock:
+            pass  # Mission count no longer tracked
+            
         return mission
 
     def get_heartbeat_times(self):
@@ -551,18 +692,30 @@ class Vehicle:
                     data["airspeed_value"] = data["airspeed_ground"]
                     data["airspeed_type"] = "GPS"
             
-            # Process GLOBAL_POSITION_INT data (AMSL altitude, position)
+            # Process GLOBAL_POSITION_INT data (AMSL altitude, position, and terrain if available)
             if self.last_global_position_int:
                 data["has_data"] = True
                 data["altitude_amsl"] = self.last_global_position_int.alt / 1000.0  # mm to meters
-                
-                # Prefer AMSL if available, otherwise use relative
-                if data["altitude_amsl"] is not None:
+                # Terrain altitude (if available)
+                terrain_alt = getattr(self.last_global_position_int, 'terrain_alt', None)
+                if terrain_alt is not None and terrain_alt != 0 and terrain_alt != 2147483647:
+                    data["altitude_terrain"] = terrain_alt / 1000.0  # mm to meters
+                else:
+                    data["altitude_terrain"] = None
+
+                # Prefer Terrain > AMSL > Above Home
+                if data["altitude_terrain"] is not None:
+                    data["altitude_value"] = data["altitude_terrain"]
+                    data["altitude_type"] = "Terrain"
+                elif data["altitude_amsl"] is not None:
                     data["altitude_value"] = data["altitude_amsl"]
                     data["altitude_type"] = "AMSL"
                 elif data["altitude_relative"] is not None:
                     data["altitude_value"] = data["altitude_relative"]
                     data["altitude_type"] = "Above Home"
+                else:
+                    data["altitude_value"] = 0.0
+                    data["altitude_type"] = "Unknown"
             
             # Process GPS_RAW_INT data (GPS status, HDOP, satellites)
             if self.last_gps_raw_int:
@@ -595,3 +748,249 @@ class Vehicle:
                 data["flight_mode"] = FLIGHT_MODES.get(custom_mode, f"Mode {custom_mode}")
             
             return data
+
+    def _request_mission_item(self, seq, target_system=1, target_component=1):
+        """Request a specific mission item from the autopilot."""
+        if seq not in self.pending_mission_item_requests and seq not in self.mission_items_cache:
+            self.pending_mission_item_requests.add(seq)
+            # Send MISSION_REQUEST_INT message
+            self.master.mav.mission_request_int_send(
+                target_system,
+                target_component,
+                seq,
+                0  # mission_type: mission items
+            )
+
+    def get_mission_data(self):
+        """
+        Get current mission status data using only real MAVLink messages.
+        Returns mission data only when current mission item information is available from MAVLink.
+        """
+        with self._flight_data_lock:
+            # Mission command mapping
+            MISSION_COMMANDS = {
+                0: "Waypoint",
+                16: "Waypoint",
+                17: "Loiter Unlimited",
+                18: "Loiter Turns",
+                19: "Loiter Time",
+                20: "Return to Launch",
+                21: "Land",
+                22: "Takeoff",
+                84: "VTOL Takeoff",
+                85: "VTOL Land",
+                176: "Do Set Servo",
+                177: "Do Repeat Servo",
+                178: "Do Set Relay",
+                179: "Do Repeat Relay",
+                183: "Do Set CAM Trigg Dist",
+                2000: "Image Start Capture",
+                2001: "Image Stop Capture"
+            }
+            
+            mission_data = {
+                "current_item": 0,
+                "total_items": 0,
+                "item_type": "Waypoint",  # Command 0 maps to Waypoint
+                "item_command": 0,
+                "mission_status": "pending",
+                "mission_state": "Not Started",
+                "has_data": False
+            }
+            
+            # Determine mission status based on flight mode even without mission items
+            if self.last_heartbeat_msg:
+                custom_mode = getattr(self.last_heartbeat_msg, 'custom_mode', 0)
+                
+                if custom_mode == 10:  # Auto mode
+                    mission_data["mission_state"] = "Active"
+                    mission_data["mission_status"] = "Active"
+                elif custom_mode == 11:  # RTL mode
+                    mission_data["mission_state"] = "Returning Home"
+                    mission_data["mission_status"] = "Active"
+                    mission_data["item_type"] = "Return to Launch"
+                    mission_data["item_command"] = 20
+                elif custom_mode in [0, 2, 5, 6]:  # Manual modes
+                    mission_data["mission_state"] = "Manual Control"
+                    mission_data["mission_status"] = "pending"
+                else:
+                    mission_data["mission_state"] = "Standby"
+                    mission_data["mission_status"] = "pending"
+                
+                mission_data["has_data"] = True
+            
+            # Map item_command to item_type using MISSION_COMMANDS
+            if mission_data["item_command"] in MISSION_COMMANDS:
+                mission_data["item_type"] = MISSION_COMMANDS[mission_data["item_command"]]
+            elif mission_data["item_command"] != 0:
+                mission_data["item_type"] = f"Command {mission_data['item_command']}"
+            
+            # Only proceed with mission item details if we have current mission item
+            if not self.last_mission_current:
+                return mission_data
+            
+            current_seq = self.last_mission_current.seq
+            mission_data["current_item"] = current_seq
+            
+            # Check if we have the mission item data for the current sequence
+            if current_seq not in self.mission_items_cache:
+                # Request the mission item if not already pending
+                self._request_mission_item(current_seq)
+                return mission_data
+            
+            # We have all required data - populate the response with actual mission item
+            mission_item = self.mission_items_cache[current_seq]
+            mission_data["item_command"] = mission_item.command
+            
+            # Map command number to readable type
+            if mission_item.command in MISSION_COMMANDS:
+                mission_data["item_type"] = MISSION_COMMANDS[mission_item.command]
+            else:
+                mission_data["item_type"] = f"Command {mission_item.command}"
+            
+            # Update mission status for Active mission execution
+            if self.last_heartbeat_msg:
+                custom_mode = getattr(self.last_heartbeat_msg, 'custom_mode', 0)
+                
+                if custom_mode == 10:  # Auto mode with Active mission item
+                    mission_data["mission_state"] = "Executing"
+                    mission_data["mission_status"] = "Active"
+            
+            mission_data["has_data"] = True
+            return mission_data
+
+    def arm(self, arm=True):
+        """Arm or disarm the vehicle using MAVLink command_long_send."""
+        # ArduPilot: MAV_CMD_COMPONENT_ARM_DISARM = 400
+        # arm=True to arm, arm=False to disarm
+        self.master.mav.command_long_send(
+            self.master.target_system,
+            self.master.target_component,
+            400,  # MAV_CMD_COMPONENT_ARM_DISARM
+            0,    # confirmation
+            1 if arm else 0,  # param1: 1 to arm, 0 to disarm
+            0, 0, 0, 0, 0, 0
+        )
+        return True
+
+    def detect_vehicle_type(self):
+        """Detect vehicle type (copter, plane, etc.) from the first heartbeat, opportunistically grabbing a heartbeat if needed."""
+        if self.last_heartbeat_msg is None:
+            msg = self.master.recv_match(type='HEARTBEAT', blocking=False)
+            if msg:
+                with self._flight_data_lock:
+                    self.last_heartbeat_msg = msg
+        if self.last_heartbeat_msg:
+            mav_type = self.last_heartbeat_msg.type
+            if mav_type == 1:
+                self.vehicle_type = 'plane'
+            elif mav_type in [2, 3, 14, 17]:
+                self.vehicle_type = 'copter'
+            else:
+                self.vehicle_type = 'unknown'
+        else:
+            self.vehicle_type = 'unknown'
+
+    def get_vehicle_type(self):
+        """Return detected vehicle type as string: 'plane', 'copter', or 'unknown'"""
+        return getattr(self, 'vehicle_type', 'unknown')
+
+    def set_mode(self, mode):
+        """Set the vehicle mode using MAVLink command_long_send. Supports ArduPlane and ArduCopter."""
+        # Detect vehicle type if not already set
+        if not hasattr(self, 'vehicle_type') or self.vehicle_type == 'unknown':
+            self.detect_vehicle_type()
+        # Mode mappings
+        PLANE_MODES = {
+            'MANUAL': 0, 'CIRCLE': 1, 'STABILIZE': 2, 'TRAINING': 3, 'ACRO': 4, 'FBWA': 5, 'FBWB': 6,
+            'CRUISE': 7, 'AUTOTUNE': 8, 'AUTO': 10, 'RTL': 11, 'LOITER': 12, 'TAKEOFF': 13, 'AVOID_ADSB': 14,
+            'GUIDED': 15, 'INITIALISING': 16, 'QSTABILIZE': 17, 'QHOVER': 18, 'QLOITER': 19, 'QLAND': 20,
+            'QRTL': 21, 'QAUTOTUNE': 22, 'THERMAL': 23
+        }
+        COPTER_MODES = {
+            'STABILIZE': 0, 'ACRO': 1, 'ALT_HOLD': 2, 'AUTO': 3, 'GUIDED': 4, 'LOITER': 5, 'RTL': 6,
+            'CIRCLE': 7, 'LAND': 9, 'DRIFT': 11, 'SPORT': 13, 'FLIP': 14, 'AUTOTUNE': 15, 'POSHOLD': 16,
+            'BRAKE': 17, 'THROW': 18, 'AVOID_ADSB': 19, 'GUIDED_NOGPS': 20, 'SMART_RTL': 21, 'FLOWHOLD': 22,
+            'FOLLOW': 23, 'ZIGZAG': 24, 'SYSTEMID': 25, 'AUTOROTATE': 26, 'AUTO_RTL': 27
+        }
+        mode_upper = mode.upper()
+        if self.vehicle_type == 'plane':
+            mode_num = PLANE_MODES.get(mode_upper)
+        elif self.vehicle_type == 'copter':
+            mode_num = COPTER_MODES.get(mode_upper)
+        else:
+            # Try both if unknown
+            mode_num = PLANE_MODES.get(mode_upper)
+            if mode_num is None:
+                mode_num = COPTER_MODES.get(mode_upper)
+        if mode_num is None:
+            raise ValueError(f"Unknown mode: {mode} for vehicle type {self.vehicle_type}")
+        self.master.mav.command_long_send(
+            self.master.target_system,
+            self.master.target_component,
+            176,  # MAV_CMD_DO_SET_MODE
+            0,    # confirmation
+            1,    # param1: mode (1=custom)
+            mode_num,  # param2: custom mode number
+            0, 0, 0, 0, 0
+        )
+        return True
+
+    def is_armed(self):
+        """Return True if the vehicle is currently armed, False otherwise. Uses last_heartbeat_msg.base_mode."""
+        # MAVLink base_mode bit 7 (128) is MAV_MODE_FLAG_SAFETY_ARMED
+        msg = self.last_heartbeat_msg
+        if msg is not None and hasattr(msg, 'base_mode'):
+            return bool(msg.base_mode & 0b10000000)
+        return False
+
+    def get_statustext_messages(self):
+        """
+        Get pending STATUSTEXT messages from the autopilot.
+        Returns a list of message dictionaries containing type, text, and timestamp.
+        """
+        messages = []
+        queue_size_before = self.statustext_messages.qsize()
+        print(f"📤 get_statustext_messages called. Queue size: {queue_size_before}")
+        
+        # Non-blocking retrieval of all available messages
+        while True:
+            try:
+                msg = self.statustext_messages.get_nowait()
+                if msg:
+                    # MAVLink STATUSTEXT severity levels: 0=emergency, 1=alert, 2=critical, 3=error, 4=warning, 5=notice, 6=info, 7=debug
+                    severity_level = getattr(msg, 'severity', 6)  # Default to info
+                    text = getattr(msg, 'text', '')
+                    
+                    # Handle both string and bytes cases
+                    if isinstance(text, bytes):
+                        text = text.decode('utf-8', errors='ignore').strip()
+                    elif isinstance(text, str):
+                        text = text.strip()
+                    else:
+                        text = str(text).strip()
+                    
+                    # Map MAVLink severity to frontend message types
+                    if severity_level <= 2:  # emergency, alert, critical
+                        msg_type = 'error'
+                    elif severity_level <= 4:  # error, warning
+                        msg_type = 'warning' 
+                    elif severity_level == 5:  # notice
+                        msg_type = 'status'
+                    else:  # info, debug
+                        msg_type = 'info'
+                    
+                    if text:  # Only add non-empty messages
+                        message_data = {
+                            'type': msg_type,
+                            'text': text,
+                            'severity': severity_level,
+                            'timestamp': time.time()
+                        }
+                        messages.append(message_data)
+                        print(f"📝 Formatted message: {message_data}")
+            except queue.Empty:
+                break
+        
+        print(f"📤 Returning {len(messages)} messages")
+        return messages
